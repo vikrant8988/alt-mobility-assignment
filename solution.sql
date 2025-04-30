@@ -116,7 +116,7 @@ SELECT
     ROUND(AVG(order_amount), 2) AS average_order_value,
     MIN(order_date) AS first_order_date,
     MAX(order_date) AS most_recent_order_date,
-    EXTRACT(DAY FROM (MAX(order_date) - MIN(order_date))) AS customer_lifetime_days
+    timestampdiff(Month, MIN(order_date), MAX(order_date)) AS customer_lifetime_months
 FROM customer_orders
 GROUP BY customer_id
 ORDER BY order_count DESC;
@@ -147,7 +147,7 @@ WITH customer_stats AS (
 
 SELECT 
     CASE 
-        WHEN order_count = 1 THEN 'One-time customers'
+        WHEN order_count = 1 THEN '1 order'
         WHEN order_count BETWEEN 2 AND 3 THEN '2-3 orders'
         WHEN order_count BETWEEN 4 AND 5 THEN '4-5 orders'
         ELSE '6+ orders'
@@ -160,7 +160,7 @@ FROM customer_stats
 GROUP BY customer_segment
 ORDER BY 
     CASE 
-        WHEN customer_segment = 'One-time customers' THEN 1
+        WHEN customer_segment = '1 order' THEN 1
         WHEN customer_segment = '2-3 orders' THEN 2
         WHEN customer_segment = '4-5 orders' THEN 3
         ELSE 4
@@ -170,15 +170,15 @@ ORDER BY
 WITH customer_stats AS (
     SELECT 
         customer_id,
-        SUM(order_amount) AS total_spend,
+        SUM(order_amount) AS total_spend
     FROM customer_orders
     WHERE order_status = 'delivered'
     GROUP BY customer_id
 )
 SELECT 
     CASE 
-        WHEN total_spend >= 1000 THEN 'High Spender'
-        WHEN total_spend BETWEEN 500 AND 999 THEN 'Medium Spender'
+        WHEN total_spend >= 448 THEN 'High Spender'
+        WHEN total_spend BETWEEN 170 AND 447 THEN 'Medium Spender'
         ELSE 'Low Spender'
     END AS segment,
     COUNT(*) AS customers,
@@ -248,7 +248,7 @@ SELECT
     COUNT(*) AS total_payments,
     SUM(CASE WHEN payment_status = 'completed' THEN 1 ELSE 0 END) AS success_payments,
     ROUND(SUM(CASE WHEN payment_status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS success_rate,
-    ROUND(AVG(CASE WHEN payment_status = 'completed' THEN payment_amount ELSE NULL END), 2) AS avg_success_amount
+    ROUND(AVG(CASE WHEN payment_status = 'completed' THEN payment_amount ELSE NULL END), 2) AS avg_success_amount,
     SUM(CASE WHEN payment_status = 'failed' THEN 1 ELSE 0 END) AS failed_payments,
     ROUND(SUM(CASE WHEN payment_status = 'failed' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS failure_rate,
     ROUND(AVG(CASE WHEN payment_status = 'failed' THEN payment_amount ELSE NULL END), 2) AS avg_failed_amount
@@ -264,8 +264,8 @@ SELECT
     COUNT(*) AS payment_count,
     SUM(CASE WHEN payment_status = 'failed' THEN 1 ELSE 0 END) AS failed_payments,
     ROUND(SUM(CASE WHEN payment_status = 'failed' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS failure_rate,
-    ROUND(SUM(payment_amount), 2) AS total_amount
-    ROUND(SUM(CASE WHEN payment_status = 'failed' THEN payment_amount ELSE NULL END), 2) AS failed_amount
+    ROUND(SUM(payment_amount), 2) AS total_amount,
+    ROUND(coalesce(SUM(CASE WHEN payment_status = 'failed' THEN payment_amount ELSE NULL END), 0), 2) AS failed_amount
 FROM payments
 GROUP BY payment_year,payment_month, payment_status
 ORDER BY payment_year,payment_month, payment_status;
@@ -290,7 +290,7 @@ WITH amount_ranges AS (
     MIN(order_amount) AS min_amount,
     MAX(order_amount) AS max_amount,
     MAX(order_amount) - MIN(order_amount) AS range_diff
-  FROM orders
+  FROM customer_orders
 ),
 range_thresholds AS (
   SELECT
@@ -308,10 +308,10 @@ SELECT
   SUM(CASE WHEN p.payment_status = 'failed' THEN 1 ELSE 0 END) AS failed_payments,
   ROUND(SUM(CASE WHEN p.payment_status = 'failed' THEN 1 ELSE 0 END) * 100.0 / COUNT(p.payment_id), 2) AS failure_rate
 FROM payments p
-JOIN orders o ON p.order_id = o.order_id
+JOIN customer_orders o ON p.order_id = o.order_id
 CROSS JOIN range_thresholds rt
 GROUP BY amount_range
-ORDER BY failure_rate
+ORDER BY failure_rate;
 
 
 -- 4. ORDER DETAILS REPORT
@@ -380,7 +380,7 @@ ORDER BY year, month;
 
 -- 5. CUSTOMER RETENTION ANALYSIS
 
--- 5.1 Customer cohort analysis (3 month cohort)
+-- 5.1 Customer cohort analysis (1 year cohort)
 WITH customer_first_order AS (
     SELECT 
         customer_id,
@@ -396,45 +396,70 @@ cohort_data AS (
         co.customer_id,
         co.order_date,
         DATE_FORMAT(co.order_date, '%Y-%m') AS order_month,
-        TIMESTAMPDIFF(MONTH, STR_TO_DATE(cfo.cohort_year_month, '%Y-%m'), co.order_date) AS months_since_first_order
+		TIMESTAMPDIFF(
+			MONTH,
+			STR_TO_DATE(CONCAT(cfo.cohort_year_month, '-01'), '%Y-%m-%d'),
+			DATE(co.order_date)
+		) AS months_since_first_order
     FROM customer_orders co
     JOIN customer_first_order cfo ON co.customer_id = cfo.customer_id
-    WHERE co.order_status = 'delivered'  -- Only consider 'delivered' orders
-),
+    WHERE order_status = 'delivered'  -- Only consider 'delivered' orders 
+)
 SELECT 
     cohort_year_month AS cohort_start_month,
-    COUNT(DISTINCT CASE WHEN months_since_first_order = 0 THEN customer_id END) AS month_0,
-    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 1 AND 3 THEN customer_id END) AS month_1_to_3_retention,
-    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 4 AND 6 THEN customer_id END) AS month_4_to_6_retention,
-    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 7 AND 9 THEN customer_id END) AS month_7_to_9_retention,    
-    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 10 AND 12 THEN customer_id END) AS month_10_to_12_retention,
-    COUNT(DISTINCT CASE WHEN months_since_first_order > 12 THEN customer_id END) AS greater_than_12_months_retention
+    COUNT(DISTINCT CASE WHEN months_since_first_order = 0 THEN customer_id END) AS cohort_size,
+    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 1 AND 12 THEN customer_id END) AS year_1,
+    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 13 AND 24 THEN customer_id END) AS year_2,
+    COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 25 AND 36 THEN customer_id END) AS year_3,
+    COUNT(DISTINCT CASE WHEN months_since_first_order > 36 THEN customer_id END) AS year_4_plus
 FROM cohort_data
 GROUP BY cohort_year_month
 ORDER BY cohort_year_month;
 
 
 -- 5.2 Cohort retention rate
-WITH cohort_table AS (
+WITH customer_first_order AS (
     SELECT 
-        cohort_year_month AS cohort_start_month,
-        COUNT(DISTINCT CASE WHEN months_since_first_order = 0 THEN customer_id END) AS month_0,
-        COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 1 AND 3 THEN customer_id END) AS month_1_to_3_retention,
-        COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 4 AND 6 THEN customer_id END) AS month_4_to_6_retention,
-        COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 7 AND 9 THEN customer_id END) AS month_7_to_9_retention,    
-        COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 10 AND 12 THEN customer_id END) AS month_10_to_12_retention,
-        COUNT(DISTINCT CASE WHEN months_since_first_order > 12 THEN customer_id END) AS greater_than_12_months_retention
-    FROM cohort_data
-    GROUP BY cohort_year_month
-    ORDER BY cohort_year_month;
+        customer_id,
+        DATE_FORMAT(MIN(order_date), '%Y-%m') AS cohort_year_month 
+    FROM customer_orders
+    WHERE order_status = 'delivered'
+    GROUP BY customer_id
+),
+cohort_data AS (
+    SELECT 
+        cfo.cohort_year_month,
+        co.order_id,
+        co.customer_id,
+        co.order_date,
+        DATE_FORMAT(co.order_date, '%Y-%m') AS order_month,
+		TIMESTAMPDIFF(
+			MONTH,
+			STR_TO_DATE(CONCAT(cfo.cohort_year_month, '-01'), '%Y-%m-%d'),
+			DATE(co.order_date)
+		) AS months_since_first_order
+    FROM customer_orders co
+    JOIN customer_first_order cfo ON co.customer_id = cfo.customer_id
+    WHERE order_status = 'delivered'  -- Only consider 'delivered' orders 
+),
+cohort_table AS (
+    SELECT 
+		cohort_year_month AS cohort_start_month,
+		COUNT(DISTINCT CASE WHEN months_since_first_order = 0 THEN customer_id END) AS cohort_size,
+		COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 1 AND 12 THEN customer_id END) AS year_1,
+		COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 13 AND 24 THEN customer_id END) AS year_2,
+		COUNT(DISTINCT CASE WHEN months_since_first_order BETWEEN 25 AND 36 THEN customer_id END) AS year_3,
+		COUNT(DISTINCT CASE WHEN months_since_first_order > 36 THEN customer_id END) AS year_4_plus
+	FROM cohort_data
+	GROUP BY cohort_year_month
 )
-SELECT first_month AS cohort_month,
-       ROUND((month_0/CAST(month_0 AS decimal))*100,0) AS m0,
-       ROUND((month_1_to_3_retention/CAST(month_0 AS decimal))*100,0) AS m1_3,
-       ROUND((month_4_to_6_retention/CAST(month_0 AS decimal))*100,0) AS m4_6,
-       ROUND((month_7_to_9_retention/CAST(month_0 AS decimal))*100,0) AS m7_9,
-       ROUND((month_10_to_12_retention/CAST(month_0 AS decimal))*100,0) AS m10_12,
-       ROUND((greater_than_12_months_retention/CAST(month_0 AS decimal))*100,0) AS 'm12+'
+SELECT
+    cohort_start_month,
+    ROUND((cohort_size / CAST(cohort_size AS DECIMAL)) * 100, 0) AS y0,  -- always 100%
+    ROUND((year_1 / CAST(cohort_size AS DECIMAL)) * 100, 0) AS y1,
+    ROUND((year_2 / CAST(cohort_size AS DECIMAL)) * 100, 0) AS y2,
+    ROUND((year_3 / CAST(cohort_size AS DECIMAL)) * 100, 0) AS y3,
+    ROUND((year_4_plus / CAST(cohort_size AS DECIMAL)) * 100, 0) AS y4_plus
 FROM cohort_table;
 
 -- 5.3 Identifying at-risk customers
@@ -451,7 +476,7 @@ gaps_with_diff AS (
         customer_id,
         order_date,
         previous_order_date,
-        DATEDIFF(order_date, previous_order_date) AS gap_days
+        TIMESTAMPDIFF(MONTH, previous_order_date, order_date) AS gap_months
     FROM order_gaps
     WHERE previous_order_date IS NOT NULL
 ),
@@ -460,9 +485,9 @@ customer_activity AS (
     SELECT 
         co.customer_id,
         MAX(co.order_date) AS last_order_date,
-        DATEDIFF(CURRENT_DATE(), MAX(co.order_date)) AS days_since_last_order,
+        TIMESTAMPDIFF(MONTH, MAX(co.order_date), CURRENT_DATE()) AS months_since_last_order,
         COUNT(*) AS total_orders,
-        AVG(gwd.gap_days) AS avg_days_between_orders
+        ROUND(AVG(gwd.gap_months), 1) AS avg_months_between_orders
     FROM customer_orders co
     LEFT JOIN gaps_with_diff gwd ON co.customer_id = gwd.customer_id
     GROUP BY co.customer_id
@@ -471,13 +496,13 @@ customer_activity AS (
 SELECT 
     customer_id,
     last_order_date,
-    days_since_last_order,
+    months_since_last_order,
     total_orders,
-    avg_days_between_orders,
+    avg_months_between_orders,
     CASE 
-        WHEN days_since_last_order > 2 * avg_days_between_orders AND total_orders > 1 THEN 'High Risk'
-        WHEN days_since_last_order > 1.5 * avg_days_between_orders AND total_orders > 1 THEN 'Medium Risk'
+        WHEN months_since_last_order > 2 * avg_months_between_orders AND total_orders > 1 THEN 'High Risk'
+        WHEN months_since_last_order > 1.5 * avg_months_between_orders AND total_orders > 1 THEN 'Medium Risk'
         ELSE 'Low Risk'
     END AS risk_category
 FROM customer_activity
-WHERE total_orders > 1 AND avg_days_between_orders IS NOT NULL
+WHERE total_orders > 1 AND avg_months_between_orders IS NOT NULL;
