@@ -362,18 +362,38 @@ GROUP BY year, month
 ORDER BY year, month;
 
 -- 4.3 Yearly-Monthly Revenue report
+WITH orders_agg AS (
+    SELECT
+        order_id,
+        order_date,
+        SUM(order_amount) AS t_order_amount
+    FROM customer_orders
+    GROUP BY order_id, order_date
+),
+payments_agg AS (
+    SELECT 
+        order_id,
+        COUNT(DISTINCT p.payment_id) AS t_payments,
+        SUM(p.payment_amount) AS t_payment_amount
+    FROM payments p
+    WHERE p.payment_status = 'completed'
+    GROUP BY order_id
+)
 SELECT 
     EXTRACT(YEAR FROM o.order_date) AS year,
     EXTRACT(MONTH FROM o.order_date) AS month,
     COUNT(DISTINCT o.order_id) AS total_orders,
-    ROUND(SUM(o.order_amount), 2) AS total_order_amount,
-    COUNT(DISTINCT p.payment_id) AS total_payments,
-    ROUND(SUM(p.payment_amount), 2) AS total_payment_amount,
-    ROUND(SUM(o.order_amount) - COALESCE(SUM(p.payment_amount), 0), 2) AS revenue_gap,
-    COUNT(DISTINCT o.order_id) - COUNT(DISTINCT p.payment_id) AS orders_without_payments,
-    ROUND((SUM(o.order_amount) - COALESCE(SUM(p.payment_amount), 0)) * 100.0 / SUM(o.order_amount), 2) AS revenue_gap_percentage
-FROM customer_orders o
-LEFT JOIN payments p ON o.order_id = p.order_id AND p.payment_status = 'completed'
+    ROUND(SUM(o.t_order_amount), 2) AS total_order_amount,
+    SUM(p.t_payments) AS total_payments,
+    ROUND(SUM(p.t_payment_amount), 2) AS total_payment_amount,
+    ROUND(SUM(o.t_order_amount) - COALESCE(SUM(p.t_payment_amount), 0), 2) AS revenue_gap,
+    COUNT(DISTINCT o.order_id) - SUM(CASE WHEN p.t_payments > 0 THEN 1 ELSE 0 END) AS orders_without_payments,
+    ROUND(
+        (SUM(o.t_order_amount) - COALESCE(SUM(p.t_payment_amount), 0)) * 100.0 / SUM(o.t_order_amount), 
+        2
+    ) AS revenue_gap_percentage
+FROM orders_agg o
+LEFT JOIN payments_agg p ON o.order_id = p.order_id
 GROUP BY year, month
 ORDER BY year, month;
 
